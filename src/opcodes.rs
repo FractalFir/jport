@@ -1,4 +1,4 @@
-use super::{load_i16, load_i32, load_i8, load_u16, load_u8};
+use crate::import::{load_i16, load_i32, load_i8, load_u16, load_u8};
 #[derive(Debug, Clone)]
 pub(crate) enum OpCode {
     Nop,
@@ -454,7 +454,7 @@ pub(crate) fn load_ops<R: std::io::Read>(
                 curr_offset += 4 as u16;
                 let high = load_i32(src)?;
                 curr_offset += 4 as u16;
-                let count = (high - low + 1);
+                let count = high - low + 1;
                 let mut pairs = Vec::with_capacity(count as usize);
                 for key in 0..count{
                     let curr_key:i32 = key - low;

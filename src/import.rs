@@ -1,10 +1,9 @@
 #![allow(dead_code)]
-mod attribute;
-pub mod opcodes;
-use crate::importer::attribute::BootstrapMethod;
+use crate::attribute::BootstrapMethod;
 use crate::IString;
-use attribute::Attribute;
-use opcodes::OpCode;
+use crate::attribute::Attribute;
+use crate::field::Field;
+use crate::opcodes::OpCode;
 macro_rules! load_fn_impl {
     ($name:ident,$tpe:ty) => {
         pub(crate) fn $name<R: std::io::Read>(src: &mut R) -> std::io::Result<$tpe> {
@@ -24,34 +23,8 @@ load_fn_impl!(load_u16, u16);
 load_fn_impl!(load_i16, i16);
 load_fn_impl!(load_u8, u8);
 load_fn_impl!(load_i8, i8);
-#[derive(Debug)]
-pub(crate) struct Field {
-    pub(crate) flags: AccessFlags,
-    pub(crate) name_index: u16,
-    pub(crate) descriptor_index: u16,
-    attributes: Box<[Attribute]>,
-}
-impl Field {
-    fn read<R: std::io::Read>(
-        src: &mut R,
-        const_items: &[ConstantItem],
-    ) -> Result<Self, std::io::Error> {
-        let flags = AccessFlags::read(src)?;
-        let name_index = load_u16(src)?;
-        let descriptor_index = load_u16(src)?;
-        let attributes_count = load_u16(src)?;
-        let mut attributes = Vec::with_capacity(attributes_count as usize);
-        for _ in 0..attributes_count {
-            attributes.push(Attribute::read(src, const_items)?);
-        }
-        Ok(Self {
-            flags,
-            name_index,
-            descriptor_index,
-            attributes: attributes.into(),
-        })
-    }
-}
+pub struct Utf8(u16);
+pub struct ClassInfo(u16);
 pub(crate) struct Method {
     access_flags: AccessFlags,
     name_index: u16,
@@ -59,55 +32,6 @@ pub(crate) struct Method {
     attributes: Box<[Attribute]>,
 }
 impl Method {
-    pub(crate) fn name<'a>(&'a self, class: &'a ImportedJavaClass) -> &str {
-        class.lookup_utf8(self.name_index).unwrap()
-    }
-    pub(crate) fn descriptor<'a>(&'a self, class: &'a ImportedJavaClass) -> &str {
-        class.lookup_utf8(self.descriptor_index).unwrap()
-    }
-    pub(crate) fn is_virtual(&self, class: &ImportedJavaClass) -> bool {
-        !(self.access_flags.is_static() || self.name(class).contains("init"))
-    }
-    /*
-    pub(crate) fn access_flags(&self) -> &AccessFlags {
-        &self.access_flags
-    }
-    pub(crate) fn name_index(&self) -> u16 {
-        self.name_index
-    }
-    pub(crate) fn descriptor_index(&self) -> u16 {
-        self.descriptor_index
-    }
-    pub(crate) fn max_locals(&self) -> Option<u16> {
-        for attribute in self.attributes.iter() {
-            if let Attribute::Code {
-                ops: _,
-                max_stack: _,
-                max_locals,
-                attributes: _,
-                exceptions: _,
-            } = attribute
-            {
-                return Some(*max_locals);
-            };
-        }
-        None
-    }*/
-    pub(crate) fn bytecode(&self) -> Option<&[(OpCode, u16)]> {
-        for attribute in self.attributes.iter() {
-            if let Attribute::Code {
-                ops,
-                max_stack: _,
-                max_locals: _,
-                attributes: _,
-                exceptions: _,
-            } = attribute
-            {
-                return Some(ops);
-            };
-        }
-        None
-    }
     fn read<R: std::io::Read>(
         src: &mut R,
         const_items: &[ConstantItem],
@@ -129,7 +53,7 @@ impl Method {
     }
 }
 
-pub(crate) struct ImportedJavaClass {
+pub struct JavaClassFile {
     const_items: Box<[ConstantItem]>,
     //name: IString,
     this_class: u16,
@@ -140,150 +64,36 @@ pub(crate) struct ImportedJavaClass {
     attributes: Box<[Attribute]>, //field_names: Box<[IString]>,
     flags: AccessFlags,
 }
-impl ImportedJavaClass {
-    pub(crate) fn flags(&self) -> &AccessFlags {
-        &self.flags
-    }
-    pub(crate) fn interfaces(&self) -> &[u16] {
-        &self.interfaces
-    }
-    pub(crate) fn lookup_invoke_dynamic(&self, dynamic: u16) -> Option<(u16, u16)> {
-        let dynamic = &self.const_items[dynamic as usize - 1];
-        if let ConstantItem::InvokeDynamic {
-            bootstrap_method_attr_index,
-            name_and_type_index,
-        } = dynamic
-        {
-            Some((*bootstrap_method_attr_index, *name_and_type_index))
-        } else {
-            None
+impl JavaClassFile {
+    pub fn get_utf8(&self, utf8: Utf8) -> Option<&str> {
+        if utf8.0 == 0{
+            return None;
         }
-    }
-    /*
-    pub(crate) fn get_bootstrap_methods(&self)->Option<Box<[BootstrapMethod]>>{
-        for attribute in self.attributes{
-            if let Attribute::BootstrapMethod { bootstrap_methods } = attribute{
-                return Some(bootstrap_methods);
-            }
-        }
-        None
-    }*/
-    pub(crate) fn lookup_method_handle(&self, method_handle: u16) -> Option<(u8, u16)> {
-        let method_handle = &self.const_items[method_handle as usize - 1];
-        if let ConstantItem::MethodHandle {
-            reference_kind,
-            reference_index,
-        } = method_handle
-        {
-            Some((*reference_kind, *reference_index))
-        } else {
-            None
-        }
-    }
-    pub(crate) fn lookup_bootstrap_method(&self, index: u16) -> Option<&BootstrapMethod> {
-        for attribute in self.attributes.iter() {
-            if let Attribute::BootstrapMethods { bootstrap_methods } = attribute {
-                return bootstrap_methods.get(index as usize);
-            }
-        }
-        None
-    }
-    pub(crate) fn name(&self) -> &str {
-        self.lookup_class(self.this_class).unwrap()
-    }
-    pub(crate) fn this_class(&self) -> u16 {
-        self.this_class
-    }
-    pub(crate) fn super_class(&self) -> u16 {
-        self.super_class
-    }
-    pub(crate) fn lookup_item(&self, index: u16) -> Option<&ConstantItem> {
-        if index < 1 || index as usize >= self.const_items.len() {
-            None
-        } else {
-            Some(&self.const_items[index as usize - 1])
-        }
-    }
-    pub(crate) fn lookup_utf8(&self, utf8: u16) -> Option<&str> {
-        let utf8 = &self.const_items[utf8 as usize - 1];
+        let utf8 = &self.const_items[utf8.0 as usize - 1];
         if let ConstantItem::Utf8(string) = utf8 {
             Some(string)
         } else {
             None
         }
     }
-    pub(crate) fn lookup_class(&self, class_ref: u16) -> Option<&str> {
-        //panic!("Const string index must point to a UTF8 const item!")
-        let name_index = &self.const_items[class_ref as usize - 1];
-        if let ConstantItem::Class { name_index } = name_index {
-            self.lookup_utf8(*name_index)
-        } else {
-            None
-        }
-    }
-    pub(crate) fn lookup_filed_ref(&self, field_ref: u16) -> Option<(u16, u16)> {
-        let field_ref = &self.const_items[field_ref as usize - 1];
-        if let ConstantItem::FieldRef {
-            class_index,
-            name_and_type_index,
-        } = field_ref
-        {
-            Some((*class_index, *name_and_type_index))
-        } else {
-            None
-        }
-    }
-    pub(crate) fn lookup_nametype(&self, nametype: u16) -> Option<(u16, u16)> {
-        let nametype = &self.const_items[nametype as usize - 1];
-        if let ConstantItem::NameAndType {
-            name_index,
-            descriptor_index,
-        } = nametype
-        {
-            Some((*name_index, *descriptor_index))
-        } else {
-            None
-        }
-    }
-    pub(crate) fn lookup_method_ref(&self, method_ref: u16) -> Option<(u16, u16)> {
-        let method_ref = &self.const_items[method_ref as usize - 1];
-        if let ConstantItem::MethodRef {
-            class_index,
-            name_and_type_index,
-        } = method_ref
-        {
-            Some((*class_index, *name_and_type_index))
-        } else if let ConstantItem::InterfaceMethodRef {
-            class_index,
-            name_and_type_index,
-        } = method_ref
-        {
-            Some((*class_index, *name_and_type_index))
-        } else {
-            None
-        }
-    }
-    /*
-    pub(crate) fn lookup_const_string(&self, const_string: usize) -> Option<&str> {
-        println!("const_string_index:{const_string}");
-        let const_string = &self.const_items[const_string - 1];
-        let string_index = if let ConstantItem::ConstString { string_index } = const_string {
-            string_index
-        } else {
-            println!("const_string:{const_string:?}");
+    pub fn get_class_info(&self, class_info:ClassInfo) -> Option<Utf8> {
+        if class_info.0 == 0{
             return None;
-        };
-        let utf8 = &self.const_items[*string_index as usize - 1];
-        if let ConstantItem::Utf8(string) = utf8 {
-            Some(&string)
-        } else {
-            panic!("Const string index must point to a UTF8 const item!")
         }
-    }*/
-    pub(crate) fn methods(&self) -> &[Method] {
-        &self.methods
+        let class_info = &self.const_items[class_info.0 as usize - 1];
+        if let ConstantItem::Class{name_index} = class_info {
+            Some(Utf8(*name_index))
+        } else {
+            None
+        }
     }
-    pub(crate) fn fields(&self) -> &[Field] {
+    pub fn this_class(&self)->ClassInfo{
+        ClassInfo(self.this_class)
+    }
+    pub fn super_class(&self)->ClassInfo{
+        ClassInfo(self.super_class)
+    }
+    pub fn fields(&self)->&[Field]{
         &self.fields
     }
 }
@@ -330,7 +140,7 @@ pub(crate) enum ConstantItem {
         name_index: u16,
     },
     Package {
-        name_index: u16,
+        name_index: u16
     },
     Utf8(IString),
     Long(i64),
@@ -503,17 +313,17 @@ impl ConstantItem {
 }
 pub(crate) fn load_class<R: std::io::Read>(
     src: &mut R,
-) -> Result<ImportedJavaClass, BytecodeImportError> {
+) -> Result<JavaClassFile, JavaImportError> {
     const CLASS_MAGIC: u32 = 0xCAFEBABE;
     let magic = load_u32(src)?;
     if magic != CLASS_MAGIC {
         //println!(
-        return Err(BytecodeImportError::NotJavaBytecode(magic));
+        return Err(JavaImportError::NotJavaBytecode(magic));
     }
     let minor = load_u16(src)?;
     let major = load_u16(src)?;
     if !(40..=64).contains(&major) || minor != 0 {
-        return Err(BytecodeImportError::UnsuportedVersion(major, minor));
+        return Err(JavaImportError::UnsuportedVersion(major, minor));
     }
     let constant_pool_count = load_u16(src)?;
     //println!("constant_pool_count:{constant_pool_count:?}");
@@ -534,11 +344,11 @@ pub(crate) fn load_class<R: std::io::Read>(
     let this_class = load_u16(src)?;
     //println!("this_class:{this_class}");
     if this_class < 1 || this_class > constant_pool_count {
-        return Err(BytecodeImportError::InvalidThisClass);
+        return Err(JavaImportError::InvalidThisClass);
     }
     let super_class = load_u16(src)?;
     if super_class > constant_pool_count {
-        return Err(BytecodeImportError::InvalidSuperClass);
+        return Err(JavaImportError::InvalidSuperClass);
     }
     let interfaces_count = load_u16(src)?;
     let mut interfaces = Vec::with_capacity(interfaces_count as usize);
@@ -561,7 +371,7 @@ pub(crate) fn load_class<R: std::io::Read>(
         attributes.push(Attribute::read(src, &const_items)?);
     }
     //println!("const_items:{const_items:?}");
-    Ok(ImportedJavaClass {
+    Ok(JavaClassFile {
         flags,
         attributes: attributes.into(),
         fields: fields.into(),
@@ -573,7 +383,7 @@ pub(crate) fn load_class<R: std::io::Read>(
     })
 }
 #[derive(Debug)]
-pub enum BytecodeImportError {
+pub enum JavaImportError {
     NotJavaBytecode(u32),
     IoError(std::io::Error),
     UnsuportedVersion(u16, u16),
@@ -582,7 +392,7 @@ pub enum BytecodeImportError {
     InvalidSuperClass,
     ZipError(zip::result::ZipError),
 }
-impl From<std::io::Error> for BytecodeImportError {
+impl From<std::io::Error> for JavaImportError {
     fn from(err: std::io::Error) -> Self {
         Self::IoError(err)
     }
@@ -597,7 +407,7 @@ impl From<std::str::Utf8Error> for ConstantImportError {
         Self::Utf8Error(err)
     }
 }
-impl From<ConstantImportError> for BytecodeImportError {
+impl From<ConstantImportError> for JavaImportError {
     fn from(err: ConstantImportError) -> Self {
         match err {
             ConstantImportError::IoError(err) => Self::IoError(err),
@@ -605,14 +415,14 @@ impl From<ConstantImportError> for BytecodeImportError {
         }
     }
 }
-impl From<zip::result::ZipError> for BytecodeImportError {
+impl From<zip::result::ZipError> for JavaImportError {
     fn from(err: zip::result::ZipError) -> Self {
         Self::ZipError(err)
     }
 }
 pub(crate) fn load_jar(
     src: &mut (impl std::io::Read + std::io::Seek),
-) -> Result<Vec<ImportedJavaClass>, BytecodeImportError> {
+) -> Result<Vec<JavaClassFile>, JavaImportError> {
     let mut zip = zip::ZipArchive::new(src)?;
     let mut classes = Vec::new();
     for i in 0..zip.len() {

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
-use super::opcodes::{load_ops, OpCode};
-use super::{load_u16, load_u32, load_u8, AccessFlags, ConstantItem};
+use crate::opcodes::{load_ops, OpCode};
+use crate::import::{load_u16, load_u32, load_u8, AccessFlags, ConstantItem};
 #[derive(Debug)]
 pub(crate) struct LocalVariable {
     start_pc: u16,
